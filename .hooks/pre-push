@@ -1,0 +1,128 @@
+#!/bin/sh
+
+set -e
+
+# Check if the required Python version is available
+PYTHON_VERSION=$(grep -oP 'python\s*=\s*"[^0-9]*\K[0-9]+\.[0-9]+' pyproject.toml)
+command -v "python$PYTHON_VERSION" >/dev/null 2>&1 || {
+    if [ "$(command -v pyenv)" ]; then
+        echo "Pyenv is available, switching local Python version to $PYTHON_VERSION"
+        pyenv install -fs "$PYTHON_VERSION"
+        pyenv local "$PYTHON_VERSION"
+    else
+        cat >&2 <<EOF
+Python $PYTHON_VERSION is not available. Aborting.
+If your Linux distribution doesn't provide it, consider using Pyenv:
+    1. Install Pyenv using your Linux distribution package manager
+    2. Run the following commands:
+        pyenv install $PYTHON_VERSION
+        pyenv local $PYTHON_VERSION
+For more information about pyenv, please visit https://github.com/pyenv/pyenv#readme
+EOF
+    exit 1
+    fi
+}
+
+# Check if poetry is installed
+command -v poetry >/dev/null 2>&1 || {
+    echo >&2 "poetry is not installed. Aborting. Please install it and try again."
+    exit 1
+}
+
+# Check if shellcheck is installed
+command -v shellcheck >/dev/null 2>&1 || {
+    echo >&2 "shellcheck is not installed. Aborting. Please install it and try again."
+    exit 1
+}
+
+# Check if parallel is installed
+command -v parallel >/dev/null 2>&1 || {
+    echo >&2 "parallel is not installed. Aborting. Please install it and try again."
+    exit 1
+}
+
+nginxVersion=1.22.1
+docker run --rm -v ${PWD}/core/tools/nginx/:/nginx/:ro nginx:$nginxVersion nginx -c /nginx/nginx.conf -t
+
+poetry install
+. "$(poetry env info --path)/bin/activate"
+
+# download some required files if they are not present
+echo "installing mavlink-router"
+./core/tools/mavlink_router/bootstrap.sh
+echo "installing mavp2p"
+./core/tools/mavp2p/bootstrap.sh
+echo "installing ardupilot_tools"
+NOSUDO=1 ./core/tools/ardupilot_tools/bootstrap.sh
+
+isort_extra_args="--check-only --diff"
+black_extra_args="--check --diff"
+fixing="false"
+
+for arg in "$@"; do
+  case $arg in
+    --fix)
+      isort_extra_args=""
+      black_extra_args=""
+      fixing="true"
+      ;;
+    *)
+      echo "Unknown argument: $arg"
+      exit 1
+      ;;
+  esac
+done
+
+echo "Running pre push hook!"
+repository_path=$(git rev-parse --show-toplevel)
+tag_name=$(git tag --points-at=HEAD | head -n 1)
+
+[ -n "$tag_name" ] && {
+    echo "Current reference has the following tag: ${tag_name}"
+    dialog --defaultno --yesno "Are you pushing a tag ?" 20 60 && {
+        echo "Checking tag name.."
+        # Check if tag follows our semver convention
+        # MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-SOMETHING.VERSION
+        $(echo "$tag_name" | grep -Po "^\d+\.\d+\.\d+(\-[A-z]+\.\d+)?$|^\d+\.\d+\.\d+$" > /dev/null) || {
+            echo "Invalid tag name!"
+            exit 1
+        }
+        echo "Tag name is valid, congratulations for the new release!"
+    }
+}
+
+echo "Running shellcheck..."
+#SC2005: Allow us to break line while running command
+#SC2015: Allow us to use short circuit
+#SC2046: Allow word splitting
+#SC2048: Allow word splitting
+#SC2086: Allow word splitting
+git ls-files '*.sh' | xargs -L 1 shellcheck --exclude=SC2005,SC2015,SC2046,SC2048,SC2086
+
+echo "Running isort.."
+# Run isort for each python project
+dirname $(git ls-files "$repository_path/*/setup.py") | xargs -I {} isort --src-path="{}" ${isort_extra_args} "{}"
+
+# This will only get the python files track by git, not including submodules
+python_files=$(git ls-files '*.py')
+
+echo "Running black.."
+black ${black_extra_args} $python_files
+
+# do not run the rest of the script if running for fixing
+[ "$fixing" = true ] && exit 0
+
+# Faster than pylint to check for issues
+echo "Running ruff.."
+ruff $python_files
+
+echo "Running pylint.."
+pylint $python_files
+
+echo "Running mypy.."
+git ls-files '*setup.py' | parallel 'mypy $(dirname {}) --cache-dir "$(dirname {})/__mypycache__"'
+
+echo "Running pytest.."
+pytest -n 10 --cov="$repository_path" --cov-report html
+
+exit 0
