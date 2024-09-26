@@ -1,6 +1,6 @@
 const menus = [
   {
-    title: 'Autopilot Firmware',
+    title: 'Autopilot --- TEXTO ALTERADO', //Alterei aqui
     icon: 'mdi-image-filter-center-focus-strong',
     route: '/vehicle/autopilot',
     advanced: false,
@@ -8,7 +8,7 @@ const menus = [
       + ' and start/stop ArduPilot (if using Navigator or SITL).',
   },
   {
-    title: 'Autopilot Parameters',
+    title: 'Autopilot --- TESTO ALTERADO TAMBEM',
     icon: 'mdi-table-settings',
     route: '/vehicle/parameters',
     text: 'View and modify vehicle parameters.',
